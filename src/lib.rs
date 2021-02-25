@@ -3,8 +3,8 @@
 use core::f32::consts::PI;
 use either::Either;
 use embedded_hal::digital::v2::InputPin;
-use rotary_encoder_hal::{Rotary};
 pub use rotary_encoder_hal::Direction;
+use rotary_encoder_hal::Rotary;
 const DEGREES_PER_REV: u16 = 360;
 
 pub struct Encoder<A, B>
@@ -49,7 +49,7 @@ where
 pub struct Angle {
     /// counts of the rotary encoder
     counts: i16,
-
+    /// How many counts there are for a the rotary_encoder
     counts_per_rev: u16,
 }
 
