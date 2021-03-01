@@ -9,4 +9,5 @@ edition = "2018"
 [dependencies]
 rotary-encoder-hal = "0.3.0"
 embedded-hal = "0.2.4"
+embedded-time = "0.10.1"
 either = {version = "1.6.0", default-features = false}
