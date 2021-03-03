@@ -2,14 +2,20 @@
 
 use core::f32::consts::PI;
 use core::ops::Sub;
+use defmt::Format;
 use either::Either;
 use embedded_hal::digital::v2::InputPin;
+use embedded_time::duration::*;
 use embedded_time::fixed_point::FixedPoint;
-use embedded_time::{duration::*, rate::*};
 pub use rotary_encoder_hal::Direction;
 use rotary_encoder_hal::Rotary;
 
 const DEGREES_PER_REV: u16 = 360;
+
+#[derive(Debug, Format, Copy, Clone)]
+pub enum Error {
+    VelocityArithmeticOverflowWouldOccur,
+}
 
 pub struct Encoder<A, B>
 where
@@ -26,19 +32,23 @@ where
     A: InputPin,
     B: InputPin,
 {
-    /// Creates an instance of a rotary encoder.
-    /// The angle indicates how far the encoder starts displaced from the origin.
+    /// Creates an instance of a rotary encoder assuming the rotary encoder is starting at rest.
     pub fn new(
         pin_a: A,
         pin_b: B,
-        angle: Angle,
+        starting_angle: Angle,
         initial_time_since_epoch_milli_sec: Milliseconds<u32>,
     ) -> Self {
         let hardware = Rotary::new(pin_a, pin_b);
-        let velocity = Velocity::new(initial_time_since_epoch_milli_sec, angle);
+        let velocity = Velocity::new(
+            initial_time_since_epoch_milli_sec,
+            initial_time_since_epoch_milli_sec,
+            starting_angle,
+            starting_angle,
+        );
         Encoder {
             hardware,
-            angle,
+            angle: starting_angle,
             velocity,
         }
     }
@@ -107,20 +117,24 @@ rad_per_sec = {}
             self.final_time_since_epoch_milli_sec.integer(),
             self.initial_angle.degrees(),
             self.final_angle.degrees(),
-            self.degrees_per_sec(),
-            self.radians_per_sec(),
+            self.degrees_per_sec().unwrap_or(f32::NAN),
+            self.radians_per_sec().unwrap_or(f32::NAN),
         )
     }
 }
 
 impl Velocity {
-    /// Creates a velocity instance assumming that the object is starting at rest
-    pub fn new(first_time_since_epoch_millisec: Milliseconds<u32>, angle: Angle) -> Self {
+    pub fn new(
+        initial_time_since_epoch_milli_sec: Milliseconds<u32>,
+        final_time_since_epoch_milli_sec: Milliseconds<u32>,
+        initial_angle: Angle,
+        final_angle: Angle,
+    ) -> Self {
         Velocity {
-            initial_time_since_epoch_milli_sec: Milliseconds(0_u32),
-            final_time_since_epoch_milli_sec: first_time_since_epoch_millisec,
-            initial_angle: angle,
-            final_angle: angle,
+            initial_time_since_epoch_milli_sec,
+            final_time_since_epoch_milli_sec,
+            initial_angle,
+            final_angle,
         }
     }
 
@@ -129,9 +143,6 @@ impl Velocity {
         current_angle: Angle,
         current_time_since_epoch_milli_sec: Milliseconds<u32>,
     ) {
-        if current_time_since_epoch_milli_sec < self.final_time_since_epoch_milli_sec {
-            return;
-        }
         self.initial_angle = self.final_angle;
         self.final_angle = current_angle;
         self.initial_time_since_epoch_milli_sec = self.final_time_since_epoch_milli_sec;
@@ -139,29 +150,59 @@ impl Velocity {
     }
 
     /// A helper function so there is not repetative code in radians_per_sec and degrees_per_sec
-    fn angle_time_diffs(&self) -> (Angle, Milliseconds<u32>) {
+    fn angle_time_diffs(&self) -> (Angle, Result<Milliseconds<u32>, Error>) {
         let delta_angle = self.final_angle - self.initial_angle;
         if self.final_time_since_epoch_milli_sec < self.initial_time_since_epoch_milli_sec {
-            return (delta_angle, Milliseconds(0_u32));
+            return (
+                delta_angle,
+                Err(Error::VelocityArithmeticOverflowWouldOccur),
+            );
         }
         let delta_time_milli_sec =
             self.final_time_since_epoch_milli_sec - self.initial_time_since_epoch_milli_sec;
 
-        (delta_angle, delta_time_milli_sec)
+        (delta_angle, Ok(delta_time_milli_sec))
     }
 
-    pub fn radians_per_sec(&self) -> f32 {
-        let (delta_angle, delta_time_milli_sec) = self.angle_time_diffs();
-        delta_angle.radians() / ((*delta_time_milli_sec.integer() as f32) / 1000.0)
+    /// This function exists so that the caller can reconstuct a velocity when a potetial
+    /// arithmetic overflow is detected
+    pub fn initial_time_since_epoch_milli_sec(&self) -> Milliseconds<u32> {
+        self.initial_time_since_epoch_milli_sec
     }
 
-    pub fn degrees_per_sec(&self) -> f32 {
+    /// This function exists so that the caller can reconstuct a velocity when a potetial
+    /// arithmetic overflow is detected
+    pub fn final_time_since_epoch_milli_sec(&self) -> Milliseconds<u32> {
+        self.final_time_since_epoch_milli_sec
+    }
+
+    /// This function exists so that the caller can reconstuct a velocity when a potetial
+    /// arithmetic overflow is detected
+    pub fn initial_angle(&self) -> Angle {
+        self.initial_angle
+    }
+
+    /// This function exists so that the caller can reconstuct a velocity when a potetial
+    /// arithmetic overflow is detected
+    pub fn final_angle(&self) -> Angle {
+        self.final_angle
+    }
+
+    pub fn radians_per_sec(&self) -> Result<f32, Error> {
         let (delta_angle, delta_time_milli_sec) = self.angle_time_diffs();
-        delta_angle.degrees() / ((*delta_time_milli_sec.integer() as f32) / 1000.0)
+        let delta_time_milli_sec = delta_time_milli_sec?;
+
+        Ok(delta_angle.radians() / ((*delta_time_milli_sec.integer() as f32) / 1_000.0))
+    }
+
+    pub fn degrees_per_sec(&self) -> Result<f32, Error> {
+        let (delta_angle, delta_time_milli_sec) = self.angle_time_diffs();
+        let delta_time_milli_sec = delta_time_milli_sec?;
+        Ok(delta_angle.degrees() / ((*delta_time_milli_sec.integer() as f32) / 1_000.0))
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Format)]
 pub struct Angle {
     /// counts of the rotary encoder
     counts: i16,
@@ -241,19 +282,29 @@ mod tests {
         let origin_offset = 0;
         let initial_angle = Angle::new(counts_per_rev, origin_offset);
         let initial_time_since_epoch_milli_sec = Milliseconds(1_u32);
-        let mut velocity = Velocity::new(initial_time_since_epoch_milli_sec, initial_angle);
-
         let angle_180_deg = Angle::new(counts_per_rev, (counts_per_rev / 2) as i16);
         let final_time_since_epoch_milli_sec = Milliseconds(1_001_u32);
+        let mut velocity = Velocity::new(
+            initial_time_since_epoch_milli_sec,
+            initial_time_since_epoch_milli_sec,
+            initial_angle,
+            initial_angle,
+        );
+
         velocity.update(angle_180_deg, final_time_since_epoch_milli_sec);
 
-        let velocity_degrees_per_sec = velocity.degrees_per_sec();
+        let velocity_degrees_per_sec = velocity.degrees_per_sec().unwrap();
         eprintln!("velocity.degrees_per_sec() = {}", velocity_degrees_per_sec);
         assert!(velocity_degrees_per_sec < 180.1 && velocity_degrees_per_sec > 179.9);
 
-        velocity = Velocity::new(initial_time_since_epoch_milli_sec, initial_angle);
+        velocity = Velocity::new(
+            initial_time_since_epoch_milli_sec,
+            initial_time_since_epoch_milli_sec,
+            initial_angle,
+            initial_angle,
+        );
         velocity.update(angle_180_deg, final_time_since_epoch_milli_sec);
-        let velocity_radians_per_sec = velocity.radians_per_sec();
+        let velocity_radians_per_sec = velocity.radians_per_sec().unwrap();
         eprintln!("velocity.radians_per_sec() = {}", velocity_radians_per_sec);
         assert!(velocity_radians_per_sec < (PI + 0.01) && velocity_radians_per_sec > (PI - 0.01))
     }
